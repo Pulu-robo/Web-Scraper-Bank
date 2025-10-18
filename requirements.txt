@@ -1,0 +1,23 @@
+# Streamlit
+streamlit==1.31.0
+
+# Core scraping
+requests==2.31.0
+beautifulsoup4==4.12.3
+lxml==5.1.0
+
+# PDF processing
+PyPDF2==3.0.1
+
+# Async
+aiohttp==3.9.3
+
+# Retry logic
+tenacity==8.2.3
+
+# Logging
+python-json-logger==2.0.7
+
+# Optional API
+flask==3.0.2
+flask-cors==4.0.0
