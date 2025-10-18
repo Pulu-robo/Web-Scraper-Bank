@@ -290,24 +290,29 @@ class EnhancedSearchIntelligence:
     def __init__(self, config: ScraperConfig):
         self.config = config
     
-    def generate_queries(self, bank_name: str, loan_type: str = "personal") -> List[str]:
-        """Generate optimized search queries"""
-        queries = [
-            # Direct PDF searches
-            f"{bank_name} {loan_type} loan terms conditions PDF filetype:pdf",
-            f"{bank_name} MITC {loan_type} loan filetype:pdf",
-            f"{bank_name} loan agreement PDF site:*.{self._get_domain(bank_name)}",
-            
-            # Specific documents
-            f"{bank_name} schedule of charges {loan_type} loan",
-            f"{bank_name} {loan_type} loan fees interest rate",
-            f"{bank_name} {loan_type} loan key facts statement",
-            
-            # Official pages
-            f'"{bank_name}" "{loan_type} loan" "terms and conditions"',
-            f"{bank_name} {loan_type} loan important terms download"
-        ]
-        return queries
+    def generate_better_queries(bank_name: str, loan_type: str) -> List[str]:
+    """Generate more focused queries"""
+    domain_map = {
+        'HDFC': 'hdfcbank.com',
+        'SBI': 'sbi.co.in',
+        'ICICI': 'icicibank.com',
+        'Axis': 'axisbank.com',
+        'Kotak': 'kotak.com',
+        'Yes Bank': 'yesbank.in',
+        'IndusInd': 'indusind.com',
+        'IDFC First': 'idfcfirstbank.com'
+    }
+    
+    domain = domain_map.get(bank_name, '')
+    
+    return [
+        # Most specific queries first
+        f'site:{domain} {loan_type} loan terms conditions PDF',
+        f'site:{domain} {loan_type} loan MITC filetype:pdf',
+        f'{bank_name} {loan_type} loan schedule charges fees PDF',
+        f'"{bank_name}" "{loan_type} loan" "terms and conditions" filetype:pdf',
+        f'{bank_name} {loan_type} loan interest rate agreement PDF',
+    ]
     
     async def search_google(self, query: str, num_results: int = 10) -> List[Dict[str, str]]:
         """Search using Google Custom Search API"""
@@ -347,22 +352,52 @@ class EnhancedSearchIntelligence:
             logger.error(f"Search error: {e}")
             return []
     
-    def filter_relevant_links(self, links: List[Dict], bank_name: str) -> List[Dict]:
-        """Filter to trusted domains only"""
-        trusted = self.config.trusted_domains.get(bank_name, [])
-        filtered = []
+    def filter_urls_better(links: List[Dict], bank_name: str, loan_type: str) -> List[Dict]:
+    """Filter out irrelevant URLs aggressively"""
+    filtered = []
+    
+    # Negative patterns to exclude
+    exclude_patterns = [
+        'deceased', 'claim', 'settlement', 'death', 'demise',
+        'credit-card', 'debit-card', 'savings-account',
+        'complaints', 'grievance', 'customer-care',
+        'careers', 'about-us', 'news', 'press-release',
+        'branch-locator', 'atm', 'nri', 'forex'
+    ]
+    
+    # Positive patterns to include
+    include_patterns = [
+        loan_type.lower(),
+        'loan',
+        'terms',
+        'conditions',
+        'mitc',
+        'agreement',
+        'charges',
+        'fees',
+        'interest',
+        '.pdf'
+    ]
+    
+    for link in links:
+        url = link.get('url', '').lower()
+        title = link.get('title', '').lower()
+        snippet = link.get('snippet', '').lower()
         
-        for link in links:
-            url = link.get('url', '')
-            domain = urlparse(url).netloc.lower()
-            
-            # Check trusted domains
-            if any(td in domain for td in trusted):
-                filtered.append(link)
-            else:
-                logger.debug(f"Filtered out untrusted domain: {domain}")
+        combined = f"{url} {title} {snippet}"
         
-        return filtered
+        # Exclude if matches negative patterns
+        if any(pattern in combined for pattern in exclude_patterns):
+            logger.info(f"🚫 Filtered: {url[:80]}")
+            continue
+        
+        # Include if matches positive patterns
+        positive_matches = sum(1 for pattern in include_patterns if pattern in combined)
+        if positive_matches >= 2:  # At least 2 positive matches
+            filtered.append(link)
+            logger.info(f"✅ Included: {url[:80]}")
+    
+    return filtered
     
     def _get_domain(self, bank_name: str) -> str:
         """Get primary domain for bank"""
@@ -724,92 +759,64 @@ class EnhancedDocumentValidator:
     """Advanced validation with scoring"""
     
     @staticmethod
-    def is_valid_loan_document(
-        text: str,
-        bank_name: str,
-        loan_type: str
-    ) -> Tuple[bool, Dict[str, any]]:
-        """Comprehensive validation with detailed scoring"""
-        validation_result = {
-            'valid': False,
-            'reasons': [],
-            'scores': {}
-        }
-        
-        if not text or len(text) < 300:
-            validation_result['reasons'].append("Content too short")
-            return False, validation_result
-        
-        text_lower = text.lower()
-        
-        # 1. Bank name check
-        bank_variations = [
-            bank_name.lower(),
-            bank_name.lower().replace(' ', ''),
-            ''.join(bank_name.lower().split())
-        ]
-        bank_found = any(var in text_lower for var in bank_variations)
-        validation_result['scores']['bank_name'] = 1.0 if bank_found else 0.0
-        
-        if not bank_found:
-            validation_result['reasons'].append("Bank name not found")
-        
-        # 2. Loan keywords
-        loan_keywords = ['loan', 'credit', 'borrower', 'lender', 'emi', 'installment']
-        loan_score = sum(1 for kw in loan_keywords if kw in text_lower) / len(loan_keywords)
-        validation_result['scores']['loan_keywords'] = loan_score
-        
-        if loan_score < 0.3:
-            validation_result['reasons'].append("Insufficient loan keywords")
-        
-        # 3. Terms/legal keywords
-        terms_keywords = [
-            'terms', 'conditions', 'agreement', 'charges', 'fees',
-            'interest', 'rate', 'annual percentage', 'apr'
-        ]
-        terms_score = sum(1 for kw in terms_keywords if kw in text_lower) / len(terms_keywords)
-        validation_result['scores']['terms_keywords'] = terms_score
-        
-        if terms_score < 0.3:
-            validation_result['reasons'].append("Insufficient terms/conditions keywords")
-        
-        # 4. Specific financial terms
-        financial_terms = [
-            'processing fee', 'interest rate', 'prepayment', 'foreclosure',
-            'penal', 'penalty', 'late payment', 'tenure', 'repayment'
-        ]
-        financial_score = sum(1 for term in financial_terms if term in text_lower) / len(financial_terms)
-        validation_result['scores']['financial_terms'] = financial_score
-        
-        # 5. Document structure indicators
-        structure_indicators = [
-            'section', 'clause', 'article', 'paragraph', 'annexure',
-            'schedule', 'appendix', 'whereas', 'hereby'
-        ]
-        structure_score = sum(1 for ind in structure_indicators if ind in text_lower) / len(structure_indicators)
-        validation_result['scores']['document_structure'] = structure_score
-        
-        # 6. Length check (proper T&C docs are substantial)
-        length_score = min(len(text) / 10000, 1.0)  # Scale up to 10k chars
-        validation_result['scores']['content_length'] = length_score
-        
-        # Overall validation
-        overall_score = (
-            validation_result['scores']['bank_name'] * 0.25 +
-            validation_result['scores']['loan_keywords'] * 0.20 +
-            validation_result['scores']['terms_keywords'] * 0.20 +
-            validation_result['scores']['financial_terms'] * 0.20 +
-            validation_result['scores']['document_structure'] * 0.10 +
-            validation_result['scores']['content_length'] * 0.05
-        )
-        
-        validation_result['overall_score'] = overall_score
-        validation_result['valid'] = overall_score >= 0.50  # Threshold
-        
-        if validation_result['valid']:
-            validation_result['reasons'].append(f"Passed validation (score: {overall_score:.2f})")
-        
-        return validation_result['valid'], validation_result
+    def validate_loan_document_improved(text: str, bank_name: str, loan_type: str) -> Tuple[bool, Dict]:
+    """Stricter validation"""
+    result = {
+        'valid': False,
+        'reasons': [],
+        'scores': {},
+        'overall_score': 0.0
+    }
+    
+    if not text or len(text) < 500:
+        result['reasons'].append("Content too short")
+        return False, result
+    
+    text_lower = text.lower()
+    
+    # 1. Must NOT contain irrelevant content
+    negative_terms = ['deceased', 'death claim', 'settlement', 'demise', 'nominee']
+    negative_count = sum(1 for term in negative_terms if term in text_lower[:1000])
+    if negative_count > 0:
+        result['reasons'].append(f"Contains irrelevant content: {negative_count} negative terms")
+        result['scores']['negative_check'] = 0.0
+        return False, result
+    result['scores']['negative_check'] = 1.0
+    
+    # 2. Bank name check
+    bank_found = bank_name.lower().replace(' ', '') in text_lower.replace(' ', '')
+    result['scores']['bank_name'] = 1.0 if bank_found else 0.0
+    
+    # 3. Loan type check
+    loan_type_found = loan_type.lower() in text_lower[:2000]
+    result['scores']['loan_type'] = 1.0 if loan_type_found else 0.3
+    
+    # 4. Essential loan keywords
+    essential_keywords = ['loan', 'interest', 'rate', 'charges', 'fees', 'emi']
+    essential_score = sum(1 for kw in essential_keywords if kw in text_lower) / len(essential_keywords)
+    result['scores']['essential_keywords'] = essential_score
+    
+    # 5. Terms keywords
+    terms_keywords = ['terms', 'conditions', 'agreement', 'tenure', 'prepayment']
+    terms_score = sum(1 for kw in terms_keywords if kw in text_lower) / len(terms_keywords)
+    result['scores']['terms_keywords'] = terms_score
+    
+    # Calculate overall score
+    overall = (
+        result['scores']['negative_check'] * 0.30 +
+        result['scores']['bank_name'] * 0.20 +
+        result['scores']['loan_type'] * 0.15 +
+        result['scores']['essential_keywords'] * 0.20 +
+        result['scores']['terms_keywords'] * 0.15
+    )
+    
+    result['overall_score'] = overall
+    result['valid'] = overall >= 0.60  # Higher threshold
+    
+    if not result['valid']:
+        result['reasons'].append(f"Low score: {overall:.2f}")
+    
+    return result['valid'], result
     
     @staticmethod
     def calculate_confidence_score(
