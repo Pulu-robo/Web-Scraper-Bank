@@ -202,39 +202,83 @@ class CircuitBreaker:
 # SEMANTIC INTELLIGENCE
 # ==============================================================================
 
-class SemanticFilter:
-    """Use embeddings to filter relevant documents"""
+class ImprovedSemanticFilter:
+    """Enhanced semantic filter that actually works"""
     
-    def __init__(self):
-        # DISABLE MODEL LOADING FOR FASTER STARTUP
-        self.model = None
-        logger.info("⚡ Semantic filtering disabled for faster startup")
+    def __init__(self, loan_type: str = "personal"):
+        self.loan_type = loan_type.lower()
+        logger.info(f"🎯 Semantic filter initialized for {loan_type} loans")
     
-    def is_relevant(self, text: str, threshold: float = 0.35) -> Tuple[bool, float]:
-        """Check if text is semantically relevant to loan documents"""
-        if not self.model or not text:
-            # Fallback to keyword-based filtering
-            text_lower = text.lower()
-            loan_keywords = ['loan', 'interest', 'terms', 'conditions', 'emi', 'charges', 'fees']
-            matches = sum(1 for kw in loan_keywords if kw in text_lower)
-            score = matches / len(loan_keywords)
-            return score > 0.2, score
+    def is_relevant(self, text: str, url: str = "", threshold: float = 0.25) -> Tuple[bool, float]:
+        """Enhanced relevance check with negative filtering"""
+        if not text or len(text) < 100:
+            return False, 0.0
         
-        # Original semantic code (never reached if model is None)
-        try:
-            text_sample = text[:2000]
-            text_embedding = self.model.encode([text_sample])[0]
-            similarities = [
-                np.dot(text_embedding, ref_emb) / 
-                (np.linalg.norm(text_embedding) * np.linalg.norm(ref_emb))
-                for ref_emb in self.reference_embeddings
-            ]
-            max_similarity = max(similarities)
-            is_relevant = max_similarity >= threshold
-            return is_relevant, max_similarity
-        except Exception as e:
-            logger.error(f"Semantic filtering error: {e}")
-            return True, 0.0
+        text_lower = text.lower()
+        url_lower = url.lower()
+        
+        # CRITICAL: Filter out irrelevant pages first
+        negative_keywords = [
+            'deceased', 'death', 'demise', 'claim', 'settlement',
+            'insurance claim', 'nominee', 'legal heir',
+            'credit card', 'debit card', 'account closure',
+            'complaint', 'grievance', 'rtgs', 'neft', 'imps'
+        ]
+        
+        # Check if it's an irrelevant page
+        for neg_kw in negative_keywords:
+            if neg_kw in text_lower[:500] or neg_kw in url_lower:
+                logger.info(f"❌ Negative match: '{neg_kw}' in {url[:60]}")
+                return False, 0.0
+        
+        # Positive scoring
+        loan_type_score = 0.0
+        loan_keywords = [
+            self.loan_type,
+            f'{self.loan_type} loan',
+            'loan',
+            'credit',
+            'borrower',
+            'lender'
+        ]
+        loan_matches = sum(1 for kw in loan_keywords if kw in text_lower[:2000])
+        loan_type_score = min(loan_matches / 4.0, 1.0)
+        
+        # Terms and conditions scoring
+        terms_keywords = [
+            'terms and conditions', 'terms & conditions', 't&c',
+            'most important terms', 'mitc',
+            'agreement', 'charges', 'fees',
+            'interest rate', 'processing fee',
+            'emi', 'installment', 'tenure',
+            'prepayment', 'foreclosure', 'annual percentage'
+        ]
+        terms_matches = sum(1 for kw in terms_keywords if kw in text_lower[:3000])
+        terms_score = min(terms_matches / 5.0, 1.0)
+        
+        # Document structure keywords
+        structure_keywords = [
+            'section', 'clause', 'article', 'schedule',
+            'annexure', 'appendix', 'eligibility'
+        ]
+        structure_matches = sum(1 for kw in structure_keywords if kw in text_lower[:2000])
+        structure_score = min(structure_matches / 3.0, 1.0)
+        
+        # Calculate final score
+        final_score = (
+            loan_type_score * 0.35 +
+            terms_score * 0.45 +
+            structure_score * 0.20
+        )
+        
+        is_relevant = final_score >= threshold
+        
+        if is_relevant:
+            logger.info(f"✅ RELEVANT (score: {final_score:.2f}): {url[:70]}")
+        else:
+            logger.info(f"⚠️ Not relevant (score: {final_score:.2f}): {url[:70]}")
+        
+        return is_relevant, final_score
 
 # ==============================================================================
 # ENHANCED SEARCH WITH GOOGLE CSE
