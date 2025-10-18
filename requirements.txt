@@ -4,7 +4,6 @@ streamlit==1.31.0
 # Core scraping
 requests==2.31.0
 beautifulsoup4==4.12.3
-# lxml removed - using html.parser instead
 
 # PDF processing
 PyPDF2==3.0.1
