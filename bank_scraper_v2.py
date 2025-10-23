@@ -158,6 +158,9 @@ class ScraperConfig:
     # STEP 27: Testing mode
     test_mode: bool = False
     
+    # STEP 31: Strictness mode (relaxed, normal, strict)
+    strictness_mode: str = "relaxed"  # Options: "relaxed", "normal", "strict"
+    
     # STEP 21: Loan-specific configuration
     loan_type_config: Dict[str, Dict] = field(default_factory=lambda: {
         'personal': {
@@ -1489,15 +1492,37 @@ class ProductionBankScraper:
             # Sort by confidence
             result['documents'].sort(key=lambda x: x['confidence'], reverse=True)
             
-            # STEP 18: Post-Processing Filters
+            # STEP 31: Adaptive Post-Processing Filters based on strictness mode
+            strictness = self.config.strictness_mode.lower()
+            
+            # Define thresholds based on strictness
+            if strictness == "strict":
+                min_bank_mentions = 3
+                min_loan_mentions = 2
+                min_confidence = 0.65
+                success_confidence = 0.70
+                logger.info("🔒 STRICT mode: High validation thresholds")
+            elif strictness == "normal":
+                min_bank_mentions = 2
+                min_loan_mentions = 1
+                min_confidence = 0.50
+                success_confidence = 0.60
+                logger.info("⚖️  NORMAL mode: Balanced validation thresholds")
+            else:  # relaxed
+                min_bank_mentions = 1
+                min_loan_mentions = 1
+                min_confidence = 0.40
+                success_confidence = 0.50
+                logger.info("🔓 RELAXED mode: Lenient validation thresholds")
+            
             # Filter 1: Bank mentions
             filtered_docs = []
             for doc in result['documents']:
                 bank_count = doc['text'].lower().count(bank_name.lower())
-                if bank_count >= 3:
+                if bank_count >= min_bank_mentions:
                     filtered_docs.append(doc)
                 else:
-                    logger.info(f"Post-filter: Removed doc with only {bank_count} bank mentions")
+                    logger.info(f"Post-filter: Removed doc with only {bank_count} bank mentions (need {min_bank_mentions}+)")
             
             result['documents'] = filtered_docs
             
@@ -1505,18 +1530,18 @@ class ProductionBankScraper:
             final_docs = []
             for doc in result['documents']:
                 loan_count = doc['text'].lower()[:2000].count(f'{loan_type} loan')
-                if loan_count >= 2:
+                if loan_count >= min_loan_mentions:
                     final_docs.append(doc)
                 else:
-                    logger.info(f"Post-filter: Removed doc with only {loan_count} loan type mentions")
+                    logger.info(f"Post-filter: Removed doc with only {loan_count} loan type mentions (need {min_loan_mentions}+)")
             
             result['documents'] = final_docs
             
             # Filter 3: Minimum confidence
-            result['documents'] = [doc for doc in result['documents'] if doc['confidence'] >= 0.65]
+            result['documents'] = [doc for doc in result['documents'] if doc['confidence'] >= min_confidence]
             
-            # STEP 18: Update success criteria - only mark success for high-quality docs
-            if result['documents'] and result['documents'][0]['confidence'] > 0.70:
+            # STEP 18: Update success criteria - mark success based on strictness mode
+            if result['documents'] and result['documents'][0]['confidence'] > success_confidence:
                 result['success'] = True
             else:
                 result['success'] = False

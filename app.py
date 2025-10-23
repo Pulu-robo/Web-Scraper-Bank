@@ -58,6 +58,28 @@ with st.sidebar:
     
     st.markdown("---")
     
+    # STEP 31: Strictness Mode
+    st.header("🎚️ Validation Strictness")
+    strictness_mode = st.selectbox(
+        "Strictness Level",
+        options=["relaxed", "normal", "strict"],
+        index=0,  # Default to relaxed
+        help="""
+        **Relaxed**: Min 1 bank mention, 1 loan mention, 40% confidence (More results)
+        **Normal**: Min 2 bank mentions, 1 loan mention, 50% confidence (Balanced)
+        **Strict**: Min 3 bank mentions, 2 loan mentions, 65% confidence (Fewer, higher quality)
+        """
+    )
+    
+    if strictness_mode == "relaxed":
+        st.info("🔓 RELAXED: More results, may include some less relevant documents")
+    elif strictness_mode == "normal":
+        st.info("⚖️ NORMAL: Balanced - good mix of quantity and quality")
+    else:
+        st.info("🔒 STRICT: Fewer results, but highest quality and relevance")
+    
+    st.markdown("---")
+    
     # STEP 27: Test Mode
     st.header("🧪 Test Mode")
     test_mode = st.checkbox("Enable Test Mode", value=False,
@@ -139,7 +161,8 @@ try:
             with st.spinner(f"Scraping {bank} {loan_type} loan documents..."):
                 try:
                     # STEP 27: Pass test_mode to scraper
-                    scraper = EasyScraper(final_api_key, final_cse_id, test_mode=test_mode)
+                    # STEP 31: Pass strictness_mode to scraper
+                    scraper = EasyScraper(final_api_key, final_cse_id, test_mode=test_mode, strictness_mode=strictness_mode)
                     # STEP 29: Pass use_cache parameter
                     result = scraper.scrape_bank(bank, loan_type, save_results=False, use_cache=use_cache)
                     
@@ -272,7 +295,8 @@ try:
                 st.warning("Please select at least one bank")
             else:
                 try:
-                    scraper = EasyScraper(final_api_key, final_cse_id)
+                    # STEP 31: Pass strictness mode to batch scraper
+                    scraper = EasyScraper(final_api_key, final_cse_id, test_mode=test_mode, strictness_mode=strictness_mode)
                     
                     progress_bar = st.progress(0)
                     status_text = st.empty()

@@ -32,22 +32,20 @@ logger = logging.getLogger(__name__)
 # ==============================================================================
 
 # URLs containing any of these substrings are rejected immediately
+# REDUCED BLACKLIST - Only truly irrelevant pages
 BLACKLIST = {
-    'decease', 'death', 'deceased', 'demise', 'obituary',
-    'insurance-claim', 'health-insurance', 'life-insurance', 'term-insurance',
-    'credit-card', 'debit-card', 'atm', 'netbanking', 'mobile-banking',
-    'savings-account', 'current-account', 'salary-account', 'zero-balance',
-    'fixed-deposit', 'fd', 'recurring-deposit', 'rd', 'time-deposit',
-    'mutual-fund', 'mf', 'trading', 'demat', 'stock', 'equity', 'shares',
-    'forex', 'remittance', 'foreign-exchange', 'currency',
-    'grievance', 'complaint', 'feedback', 'contact-us', 'customer-care',
-    'careers', 'jobs', 'recruitment', 'vacancy', 'internship',
-    'branch-locator', 'atm-locator', 'ifsc-code', 'micr-code',
-    'locker', 'safe-deposit-box', 'vault',
-    'nri-services', 'nre-account', 'nro-account', 'fcnr',
-    'cheque-book', 'passbook', 'statement',
-    'kyc', 'pan-card', 'aadhar', 'know-your-customer'
+    'deceased', 'death', 'obituary', 'demise',  # Death-related
+    'career', 'job', 'recruitment', 'vacancy',  # Jobs
+    'branch-locator', 'atm-locator',  # Locators
+    'facebook.com', 'twitter.com', 'linkedin.com'  # Social media
 }
+
+# REMOVED from blacklist (too aggressive):
+# - fd, rd (can match in URLs like /pdf/)
+# - card, credit, debit (too broad, catches valid loan docs)
+# - savings, current (too broad)
+# - grievance, complaint, feedback (too broad)
+# - kyc, pan, aadhar (can be in loan docs)
 
 # Loan-type specific keyword bundles for URL/token matching
 LOAN_KEYWORDS = {
@@ -243,61 +241,52 @@ class ImprovedSemanticFilter:
             logger.info(f"   Details: '{blacklist_hit}' found in URL")
             return False, 0.0
 
+        # RELAXED: Only reject if CLEARLY about wrong product (appears in title/URL AND dominates content)
         wrong_product_keywords = [
-            'credit card', 'creditcard', 'debit card',
-            'savings account', 'current account',
-            'fixed deposit', 'recurring deposit',
-            'insurance policy', 'life insurance'
+            'credit card', 'creditcard', 'debit card'
         ]
 
         for wrong_prod in wrong_product_keywords:
-            if wrong_prod in url_lower or wrong_prod in text_lower[:600]:
+            # Only check if it's in the URL (strong signal)
+            if wrong_prod in url_lower:
                 loan_mentions = sum(1 for term in loan_terms[:6] if term in text_lower[:1500])
-                if loan_mentions < 2:
-                    # STEP 20: Enhanced rejection logging
+                # Only reject if loan is barely mentioned
+                if loan_mentions < 1:
                     logger.info(f"🚫 REJECTED: {url[:80]}")
                     logger.info(f"   Reason: Wrong product type")
                     logger.info(f"   Details: '{wrong_prod}' detected, only {loan_mentions} loan mentions")
                     return False, 0.0
         
-        # STEP 10: Loan type variation check - detect if document is about different loan type
-        # Get variations for target loan type
+        # RELAXED: Only reject if DRASTICALLY dominated by wrong loan type
         target_variations = LOAN_VARIATIONS.get(self.loan_type, {})
         target_names = target_variations.get('names', [])
         target_keywords = target_variations.get('keywords', [])
         all_target_terms = target_names + target_keywords
         
-        # Check against other loan types
         other_loan_types = [lt for lt in LOAN_VARIATIONS.keys() if lt != self.loan_type]
-        
-        # Count target loan mentions in first 2000 chars
         target_count = sum(1 for term in all_target_terms if term in text_lower[:2000])
         
-        # Check if document is dominated by another loan type
+        # Only reject if other loan type is mentioned 5x more AND target has 0 mentions
         for other_type in other_loan_types:
             other_variations = LOAN_VARIATIONS.get(other_type, {})
             other_names = other_variations.get('names', [])
             other_keywords = other_variations.get('keywords', [])
             all_other_terms = other_names + other_keywords
-            
-            # Count other loan type mentions
             other_count = sum(1 for term in all_other_terms if term in text_lower[:2000])
             
-            # If other loan type is mentioned 2x more than target, reject
-            if other_count > target_count * 2 and other_count >= 3:
-                # STEP 20: Enhanced rejection logging
+            # Much more lenient: only reject if REALLY wrong
+            if other_count >= 5 and target_count == 0:
                 logger.info(f"🚫 REJECTED: {url[:80]}")
                 logger.info(f"   Reason: Wrong loan type dominates")
                 logger.info(f"   Details: '{other_type}' ({other_count} mentions) vs target ({target_count} mentions)")
                 return False, 0.0
 
-        negative_keywords = [
-            'deceased', 'death', 'demise', 'claim', 'settlement',
-            'insurance claim', 'nominee', 'legal heir',
-            'complaint', 'grievance', 'customer care'
+        # RELAXED: Only reject truly death/obituary related pages
+        critical_negative_keywords = [
+            'deceased', 'death', 'demise', 'obituary'
         ]
 
-        for neg_kw in negative_keywords:
+        for neg_kw in critical_negative_keywords:
             if neg_kw in text_lower[:800] or neg_kw in url_lower:
                 logger.info(f"❌ Filtered: '{neg_kw}' found in {url[:60]}")
                 return False, 0.0
@@ -347,86 +336,81 @@ class ImprovedValidator:
                 return False, result
         result['scores']['negative_check'] = 1.0
         
-        # STEP 11: Bank competition check - reject if competing banks mentioned more than target
+        # RELAXED: Only reject if competing bank is mentioned 3x more AND target has 0 mentions
         all_banks = ['HDFC', 'SBI', 'ICICI', 'Axis', 'Kotak', 'Yes Bank', 'IndusInd', 'IDFC First', 'PNB', 'Bank of Baroda']
         competing_banks = [b for b in all_banks if b.lower() != bank_name.lower()]
         
-        # Count target bank mentions
         bank_clean = bank_name.lower().replace(' ', '')
         text_clean = text_lower.replace(' ', '')
         target_count = text_clean[:2000].count(bank_clean)
         
-        # Count competing bank mentions
+        # Only reject if CLEARLY about wrong bank
         for competitor in competing_banks:
             competitor_clean = competitor.lower().replace(' ', '')
             competitor_count = text_clean[:2000].count(competitor_clean)
             
-            if competitor_count > target_count:
+            # Much more lenient: only reject if drastically wrong
+            if competitor_count >= 3 and target_count == 0:
                 result['reasons'].append(f"Wrong bank: {competitor} mentioned {competitor_count} times vs {bank_name} {target_count} times")
-                # STEP 20: Enhanced bank competition logging
                 logger.info(f"❌ BANK COMPETITION: Document rejected")
                 logger.info(f"   Target: {bank_name} ({target_count} mentions)")
                 logger.info(f"   Competitor: {competitor} ({competitor_count} mentions)")
-                logger.info(f"   Location: First 2000 chars")
                 return False, result
         
-        # STEP 12: Strict bank name check - require minimum 3 mentions
-        if target_count < 3:
-            result['reasons'].append(f"Insufficient bank mentions: {target_count} (need 3+)")
-            logger.info(f"❌ Insufficient bank mentions: {bank_name} only {target_count} times (need 3+)")
+        # RELAXED: Accept documents with at least 1 bank mention
+        # Strictness mode will handle further filtering
+        if target_count < 1:
+            result['reasons'].append(f"Insufficient bank mentions: {target_count} (need 1+)")
+            logger.info(f"❌ Insufficient bank mentions: {bank_name} only {target_count} times (need 1+)")
             return False, result
         
-        # 2. CRITICAL: Check for wrong product types in content
-        # If document is about credit cards, savings accounts, etc., reject it
-        wrong_product_indicators = [
-            ('credit card', ['key fact', 'statement', 'annual fee', 'cashback', 'reward point']),
-            ('debit card', ['atm', 'pin', 'card number']),
-            ('savings account', ['minimum balance', 'passbook', 'chequebook']),
-            ('fixed deposit', ['maturity', 'premature withdrawal penalty']),
-            ('insurance', ['premium', 'policy', 'claim', 'beneficiary'])
-        ]
-        
-        for product, indicators in wrong_product_indicators:
-            # Count how many indicators of this wrong product appear
-            indicator_count = sum(1 for ind in indicators if ind in text_lower[:2000])
-            # If product name + 2 or more indicators, likely wrong product
-            if product in text_lower[:1000] and indicator_count >= 2:
-                # Double-check: is the target loan type prominently mentioned?
+        # RELAXED: Only reject if CLEARLY about wrong product (credit card ONLY)
+        # Only check credit cards since that's the most common contamination
+        if 'credit card' in text_lower[:500]:
+            # Count strong credit card indicators
+            cc_indicators = ['cashback', 'reward point', 'credit limit', 'billing cycle']
+            indicator_count = sum(1 for ind in cc_indicators if ind in text_lower[:2000])
+            
+            # Only reject if strong credit card signals AND no loan mentions
+            if indicator_count >= 2:
                 loan_mentions = text_lower[:2000].count(loan_type.lower())
-                if loan_mentions < 2:  # Loan type not prominent
-                    result['reasons'].append(f"Document appears to be about {product}, not {loan_type} loan")
+                if loan_mentions == 0:
+                    result['reasons'].append(f"Document appears to be about credit card, not {loan_type} loan")
                     return False, result
         
         # 3. Bank name score (target_count already calculated in STEP 12)
         # STEP 12: Scale score with mention count (max score at 5 mentions)
         result['scores']['bank_name'] = min(target_count / 5.0, 1.0)
         
-        # 4. Loan type - must be mentioned multiple times in first 2000 chars
+        # RELAXED: Accept if loan type OR "loan" keyword is present
         loan_mentions = text_lower[:2000].count(loan_type.lower())
-        if loan_mentions == 0:
+        generic_loan = text_lower[:2000].count(' loan')
+        
+        if loan_mentions == 0 and generic_loan < 2:
             result['reasons'].append(f"Loan type '{loan_type}' not found in document")
             return False, result
-        result['scores']['loan_type'] = min(loan_mentions / 3.0, 1.0)
         
-        # STEP 13: Loan Type Competition Check
-        # Check if document is primarily about a different loan type
+        # Use combined score
+        total_loan_mentions = loan_mentions + (generic_loan // 2)  # Count generic loans as half
+        result['scores']['loan_type'] = min(total_loan_mentions / 3.0, 1.0)
+        
+        # RELAXED: Only reject if DRASTICALLY dominated by wrong loan type
         other_loan_types = list(LOAN_VARIATIONS.keys())
         if loan_type.lower() in other_loan_types:
             other_loan_types.remove(loan_type.lower())
         
-        # Get target loan variations
         target_variations = LOAN_VARIATIONS.get(loan_type.lower(), {}).get('names', [])
-        target_count = sum(text_lower[:1500].count(name.lower()) for name in target_variations)
+        target_loan_count = sum(text_lower[:1500].count(name.lower()) for name in target_variations)
         
-        # Check each other loan type
+        # Only reject if other loan type mentioned 5x more AND target has 0 mentions
         for other_type in other_loan_types:
             other_variations = LOAN_VARIATIONS.get(other_type, {}).get('names', [])
             other_count = sum(text_lower[:1500].count(name.lower()) for name in other_variations)
             
-            # If other loan type mentioned 2x more than target, reject
-            if other_count > target_count * 2 and other_count >= 2:
-                result['reasons'].append(f"Document primarily about {other_type} loan (mentioned {other_count} times vs {loan_type} {target_count} times)")
-                logger.info(f"❌ Loan type competition: {other_type} ({other_count}) > {loan_type} ({target_count})")
+            # Much more lenient
+            if other_count >= 5 and target_loan_count == 0:
+                result['reasons'].append(f"Document primarily about {other_type} loan (mentioned {other_count} times vs {loan_type} {target_loan_count} times)")
+                logger.info(f"❌ Loan type competition: {other_type} ({other_count}) > {loan_type} ({target_loan_count})")
                 return False, result
         
         # 5. Essential keywords
@@ -506,72 +490,56 @@ class ImprovedSearch:
     
     @staticmethod
     def filter_urls(links: List[Dict], bank_name: str, loan_type: str) -> List[str]:
-        """Filter URLs aggressively with strict product type checking"""
-        exclude = [
-            'deceased', 'claim', 'settlement', 'death',
-            'credit-card', 'debit-card', 'savings',
-            'complaints', 'customer-care', 'careers',
-            'about-us', 'news', 'branch', 'atm',
-            'creditcard', 'credit card'  # Handle both formats
+        """RELAXED URL filtering - only reject obvious non-loan pages"""
+        
+        # CRITICAL: Only reject OBVIOUSLY wrong pages
+        # Most validation will happen during content extraction
+        critical_excludes = [
+            'deceased', 'death', 'obituary', 'demise',  # Death-related only
+            'career', 'job', 'recruitment',  # Jobs
+            'branch-locator', 'atm-locator', 'ifsc',  # Locators
+            'mobile-banking-app', 'net-banking',  # App/netbanking pages
+            'facebook.com', 'twitter.com', 'linkedin.com', 'instagram.com'  # Social media
         ]
-
-        # Known EMI / calculator patterns (handle specially)
-        calculator_patterns = ['emi', 'calculator', 'emi-calculator', 'emi-cal', 'loan-calculator', 'calculate-emi']
-
-        # Wrong product types - MUST reject these
-        wrong_products = [
-            'credit', 'creditcard', 'debit', 'card', 
-            'savings', 'current', 'account', 'deposit',
-            'insurance', 'investment', 'mutual', 'fund'
-        ]
-
-        include = [loan_type.lower(), 'loan', 'terms', 'conditions', 'charges', 'pdf']
+        
+        # Calculator pages (but NOT if they have T&C keywords)
+        calculator_only = ['emi-calculator', 'loan-calculator', 'emi-cal']
         
         filtered = []
         for link in links:
             url_raw = link.get('url', '')
-            url = url_raw.lower()
-            title = link.get('title', '').lower()
-            combined = f"{url} {title}"
+            url_lower = url_raw.lower()
+            title_lower = link.get('title', '').lower()
             
-            # Decode URL entities for better matching
+            # Quick decode
             from urllib.parse import unquote
-            combined_decoded = unquote(combined)
+            url_decoded = unquote(url_lower)
             
-            # FIRST: Reject wrong product types (credit cards, savings accounts, etc.)
-            # Check if URL/title mentions these products WITHOUT also mentioning the target loan type
-            has_wrong_product = False
-            for wrong_prod in wrong_products:
-                if wrong_prod in combined_decoded:
-                    # Only reject if it's clearly about that product (not just mentioning it)
-                    # e.g., "credit card terms" should be rejected
-                    # but "personal loan credit score" should not
-                    if wrong_prod in url or wrong_prod in title:
-                        # Make sure it's not a loan document that just mentions cards
-                        if loan_type.lower() not in combined_decoded[:100]:  # loan type not prominent
-                            has_wrong_product = True
-                            logger.info(f"🚫 Excluding wrong product ({wrong_prod}): {url_raw[:80]}")
-                            break
+            # ONLY reject if CRITICAL exclude patterns found
+            should_exclude = False
+            for pattern in critical_excludes:
+                if pattern in url_decoded or pattern in title_lower:
+                    logger.info(f"🚫 Critical exclude: {url_raw[:80]}")
+                    should_exclude = True
+                    break
             
-            if has_wrong_product:
+            if should_exclude:
                 continue
             
-            # Skip if has negative patterns
-            if any(pattern in combined_decoded for pattern in exclude):
-                logger.info(f"🚫 Excluding negative pattern: {url_raw[:80]}")
-                continue
-
-            # Be aggressive about calculator links
-            has_calc = any(pattern in combined for pattern in calculator_patterns)
-            if has_calc:
-                if not any(k in combined for k in ['terms', 'tnc', '.pdf', 'mitc', 'terms-and-conditions']):
-                    logger.info(f"🚫 Excluding calculator/tool link: {url_raw[:80]}")
-                    continue
+            # Reject pure calculator pages (unless they have T&C)
+            is_calculator = any(calc in url_decoded for calc in calculator_only)
+            has_tnc_hint = any(hint in url_decoded for hint in ['term', 'tnc', 'mitc', 'condition', 'charge', '.pdf'])
             
-            # Include if has enough positive patterns
-            positive_count = sum(1 for pattern in include if pattern in combined)
-            if positive_count >= 2:
-                filtered.append(url_raw)
+            if is_calculator and not has_tnc_hint:
+                logger.info(f"🚫 Calculator page: {url_raw[:80]}")
+                continue
+            
+            # ACCEPT EVERYTHING ELSE
+            # Let content validation do the heavy lifting
+            filtered.append(url_raw)
+        
+        logger.info(f"✅ Query: {' '.join([str(link.get('title', '')[:30]) for link in links[:1]])}")
+        logger.info(f"   Results: {len(links)} → Filtered: {len(filtered)}")
         
         return filtered
 
@@ -582,10 +550,11 @@ class ImprovedSearch:
 class FixedBankScraper:
     """Fixed scraper with all improvements"""
     
-    def __init__(self, google_api_key: str, google_cse_id: str, test_mode: bool = False):
+    def __init__(self, google_api_key: str, google_cse_id: str, test_mode: bool = False, strictness_mode: str = "relaxed"):
         self.api_key = google_api_key
         self.cse_id = google_cse_id
         self.test_mode = test_mode  # STEP 27
+        self.strictness_mode = strictness_mode  # STEP 31
         self.search = ImprovedSearch()
         
         # STEP 29: Initialize cache
@@ -595,6 +564,7 @@ class FixedBankScraper:
         logger.info("✅ Fixed scraper initialized")
         if test_mode:
             logger.info("🧪 Test mode enabled in FixedBankScraper")
+        logger.info(f"🎚️ Strictness mode: {strictness_mode.upper()}")
     
     def _get_cache_key(self, bank_name: str, loan_type: str) -> Path:
         """Generate cache filename"""
@@ -727,8 +697,41 @@ class FixedBankScraper:
             # Sort by confidence
             result['documents'].sort(key=lambda x: x['confidence'], reverse=True)
             
-            # Mark success
-            if result['documents'] and result['documents'][0]['confidence'] > 0.60:
+            # STEP 31: Apply strictness-based filtering
+            strictness = self.strictness_mode.lower()
+            
+            if strictness == "strict":
+                min_confidence = 0.65
+                min_bank_mentions = 3
+                success_threshold = 0.70
+            elif strictness == "normal":
+                min_confidence = 0.50
+                min_bank_mentions = 2
+                success_threshold = 0.60
+            else:  # relaxed
+                min_confidence = 0.40
+                min_bank_mentions = 1
+                success_threshold = 0.50
+            
+            # Apply filters
+            filtered_docs = []
+            for doc in result['documents']:
+                # Check confidence
+                if doc['confidence'] < min_confidence:
+                    continue
+                
+                # Check bank mentions
+                bank_count = doc['text'].lower().count(bank_name.lower())
+                if bank_count < min_bank_mentions:
+                    logger.info(f"Filtered: {bank_count} bank mentions (need {min_bank_mentions}+)")
+                    continue
+                
+                filtered_docs.append(doc)
+            
+            result['documents'] = filtered_docs
+            
+            # Mark success based on strictness
+            if result['documents'] and result['documents'][0]['confidence'] > success_threshold:
                 result['success'] = True
             
             result['metadata']['execution_time_seconds'] = round(time.time() - start_time, 2)
@@ -967,12 +970,14 @@ class FixedBankScraper:
 class EasyScraper:
     """Drop-in replacement for your existing EasyScraper"""
     
-    def __init__(self, google_api_key: str = None, google_cse_id: str = None, test_mode: bool = False):
+    def __init__(self, google_api_key: str = None, google_cse_id: str = None, test_mode: bool = False, strictness_mode: str = "relaxed"):
         # STEP 27: Support test mode
+        # STEP 31: Support strictness mode
         self.scraper = FixedBankScraper(
             google_api_key or "YOUR_API_KEY_HERE",
             google_cse_id or "YOUR_CSE_ID_HERE",
-            test_mode=test_mode
+            test_mode=test_mode,
+            strictness_mode=strictness_mode
         )
         # STEP 29: Cache access (use a simple proxy class)
         self.cache = self.scraper
@@ -980,6 +985,7 @@ class EasyScraper:
         logger.info("🚀 EasyScraper initialized with fixes")
         if test_mode:
             logger.info("🧪 Test mode enabled")
+        logger.info(f"🎚️ Strictness mode: {strictness_mode.upper()}")
     
     def scrape_bank(
         self,
